@@ -12,15 +12,16 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from core.llm import AnthropicProvider, LLMProvider, Message, OllamaProvider, OpenAIProvider
-from core.parts import (
-    DEFAULT_PART,
-    create_part,
-    delete_part as registry_delete_part,
-    list_parts,
+from core.pipeline import ingest_pdf
+from core.pods import (
+    DEFAULT_POD,
+    create_pod,
+    delete_pod as registry_delete_pod,
+    list_pods,
     pdf_dir,
+    rename_pod as registry_rename_pod,
     validate_name,
 )
-from core.pipeline import ingest_pdf
 from core.prompts import SYSTEM, build_user_prompt
 from core.retriever import retrieve
 from core.store import Store
@@ -48,14 +49,37 @@ def get_store() -> Store:
     return Store()
 
 
+# ------------------------------------------------------------------ pod ops
+
+def _rename_pod_everywhere(old: str, new: str, store: Store) -> None:
+    """Rename in registry + chunk metadata + on-disk pdf folder."""
+    new = validate_name(new)
+    # Registry does its own validation (duplicates, Default guard).
+    registry_rename_pod(old, new)
+    store.rename_pod(old, new)
+    old_dir = pdf_dir(old)  # creates it if missing, harmless
+    new_dir = pdf_dir(new)
+    # If the destination is empty, move; otherwise merge files across.
+    if old_dir.exists() and old_dir.resolve() != new_dir.resolve():
+        for f in old_dir.iterdir():
+            target = new_dir / f.name
+            if target.exists():
+                target.unlink()
+            shutil.move(str(f), str(target))
+        try:
+            old_dir.rmdir()
+        except OSError:
+            pass
+
+
 # ------------------------------------------------------------------ ingest
 
-def _handle_uploads(uploaded_files, part: str, force: bool) -> None:
-    """Save uploaded PDFs under data/pdfs/<part>/ and index them into the part."""
+def _handle_uploads(uploaded_files, pod: str, force: bool) -> None:
+    """Save uploaded PDFs under data/pdfs/<pod>/ and index them into the pod."""
     store = get_store()
-    target_dir = pdf_dir(part)
+    target_dir = pdf_dir(pod)
     status_area = st.status(
-        f"Ingesting {len(uploaded_files)} file(s) into '{part}'…", expanded=True
+        f"Ingesting {len(uploaded_files)} file(s) into '{pod}'…", expanded=True
     )
 
     with status_area:
@@ -75,11 +99,11 @@ def _handle_uploads(uploaded_files, part: str, force: bool) -> None:
                     frac = 0.1 + 0.9 * (cur / total)
                     bar.progress(frac, text=f"embedding {cur}/{total} chunks…")
 
-            result = ingest_pdf(target, store, part=part, force=force, progress=progress)
+            result = ingest_pdf(target, store, pod=pod, force=force, progress=progress)
             bar.empty()
 
             if result.skipped:
-                st.info("↳ already indexed in this part — enable *Re-ingest existing* to overwrite.")
+                st.info("↳ already indexed in this pod — enable *Re-ingest existing* to overwrite.")
             elif result.error:
                 st.error(f"↳ failed: {result.error}")
             else:
@@ -94,8 +118,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
-if "active_part" not in st.session_state:
-    st.session_state.active_part = DEFAULT_PART
+if "active_pod" not in st.session_state:
+    st.session_state.active_pod = DEFAULT_POD
 
 
 # ------------------------------------------------------------------ sidebar
@@ -105,98 +129,124 @@ with st.sidebar:
     st.caption("Local-first RAG over your PDFs")
 
     store = get_store()
-    parts = list_parts()
+    pods = list_pods()
 
-    # ---- Part selector ------------------------------------------
-    st.subheader("Part")
-    if st.session_state.active_part not in parts:
-        st.session_state.active_part = DEFAULT_PART
+    # ---- Pod selector ------------------------------------------
+    st.subheader("Pod")
+    if st.session_state.active_pod not in pods:
+        st.session_state.active_pod = DEFAULT_POD
 
-    active_part = st.selectbox(
-        "Active part",
-        parts,
-        index=parts.index(st.session_state.active_part),
+    active_pod = st.selectbox(
+        "Active pod",
+        pods,
+        index=pods.index(st.session_state.active_pod),
         label_visibility="collapsed",
-        help="A Part is a group of documents (e.g. 'Data Structures', 'Mathematics').",
+        help="A Pod is a group of documents (e.g. 'Data Structures', 'Mathematics').",
     )
-    if active_part != st.session_state.active_part:
-        st.session_state.active_part = active_part
-        st.session_state.messages = []  # fresh chat when switching parts
+    if active_pod != st.session_state.active_pod:
+        st.session_state.active_pod = active_pod
+        st.session_state.messages = []  # fresh chat when switching pods
         st.rerun()
 
-    part_chunks = store.count(part=active_part)
-    part_sources = sorted(store.sources(part=active_part))
+    pod_chunks = store.count(pod=active_pod)
+    pod_sources = sorted(store.sources(pod=active_pod))
     col_a, col_b = st.columns(2)
-    col_a.metric("Documents", len(part_sources))
-    col_b.metric("Chunks", part_chunks)
+    col_a.metric("Documents", len(pod_sources))
+    col_b.metric("Chunks", pod_chunks)
 
-    with st.expander("Manage parts", expanded=False):
-        new_name = st.text_input("New part name", key="new_part_input",
-                                 placeholder="e.g. Machine Learning")
-        if st.button("Create part", use_container_width=True):
+    with st.expander("Manage pods", expanded=False):
+        # Create
+        st.markdown("**Create pod**")
+        new_name = st.text_input("New pod name", key="new_pod_input",
+                                 placeholder="e.g. Machine Learning",
+                                 label_visibility="collapsed")
+        if st.button("Create pod", use_container_width=True):
             try:
-                created = create_part(new_name)
-                st.session_state.active_part = created
+                created = create_pod(new_name)
+                st.session_state.active_pod = created
                 st.session_state.messages = []
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
 
         st.divider()
-        if active_part == DEFAULT_PART:
-            st.caption("The Default part cannot be deleted.")
+
+        # Rename
+        st.markdown(f"**Rename '{active_pod}'**")
+        if active_pod == DEFAULT_POD:
+            st.caption("The Default pod cannot be renamed.")
         else:
-            st.write(f"Delete part **{active_part}**")
-            confirm = st.checkbox(
-                f"I understand this removes all {len(part_sources)} document(s) and "
-                f"{part_chunks} chunk(s) from '{active_part}'.",
-                key=f"confirm-del-{active_part}",
+            rename_to = st.text_input(
+                "New name", key=f"rename-input-{active_pod}",
+                placeholder="New pod name", label_visibility="collapsed",
             )
-            if st.button("Delete this part", type="secondary",
+            if st.button("Rename pod", use_container_width=True,
+                         disabled=not rename_to.strip()):
+                try:
+                    _rename_pod_everywhere(active_pod, rename_to, store)
+                    st.session_state.active_pod = rename_to.strip()
+                    st.session_state.messages = []
+                    st.success(f"Renamed to '{rename_to.strip()}'.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+        st.divider()
+
+        # Delete
+        st.markdown(f"**Delete '{active_pod}'**")
+        if active_pod == DEFAULT_POD:
+            st.caption("The Default pod cannot be deleted.")
+        else:
+            confirm = st.checkbox(
+                f"I understand this removes {len(pod_sources)} document(s) and "
+                f"{pod_chunks} chunk(s).",
+                key=f"confirm-del-{active_pod}",
+            )
+            if st.button("Delete this pod", type="secondary",
                          use_container_width=True, disabled=not confirm):
-                store.delete_part(active_part)
-                registry_delete_part(active_part)
-                folder = pdf_dir(active_part)
+                store.delete_pod(active_pod)
+                registry_delete_pod(active_pod)
+                folder = pdf_dir(active_pod)
                 if folder.exists():
                     shutil.rmtree(folder, ignore_errors=True)
-                st.session_state.active_part = DEFAULT_PART
+                st.session_state.active_pod = DEFAULT_POD
                 st.session_state.messages = []
                 st.rerun()
 
     st.divider()
 
     # ---- Upload -------------------------------------------------
-    st.subheader(f"Add documents to '{active_part}'")
+    st.subheader(f"Add documents to '{active_pod}'")
     uploaded = st.file_uploader(
         "Drop PDFs here",
         type=["pdf"],
         accept_multiple_files=True,
-        key=f"uploader-{active_part}-{st.session_state.uploader_key}",
-        help=f"Files are saved to data/pdfs/{active_part}/ and indexed into this part.",
+        key=f"uploader-{active_pod}-{st.session_state.uploader_key}",
+        help=f"Files are saved to data/pdfs/{active_pod}/ and indexed into this pod.",
     )
     force_reingest = st.checkbox(
         "Re-ingest if already present", value=False,
-        help="Overwrite the stored chunks for any file with the same name in this part.",
+        help="Overwrite the stored chunks for any file with the same name in this pod.",
     )
     if uploaded and st.button("Ingest uploaded files", type="primary", use_container_width=True):
-        _handle_uploads(uploaded, part=active_part, force=force_reingest)
+        _handle_uploads(uploaded, pod=active_pod, force=force_reingest)
         st.session_state.uploader_key += 1  # clears the dropzone on rerun
         st.rerun()
 
     # ---- Sources list -------------------------------------------
-    with st.expander(f"Documents in '{active_part}' ({len(part_sources)})", expanded=False):
-        if not part_sources:
+    with st.expander(f"Documents in '{active_pod}' ({len(pod_sources)})", expanded=False):
+        if not pod_sources:
             st.info("No documents yet. Drop a PDF above to get started.")
         else:
-            for s in part_sources:
+            for s in pod_sources:
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"• {s}")
-                if c2.button("✕", key=f"del-{active_part}-{s}",
-                             help=f"Remove {s} from '{active_part}'"):
-                    store.delete_source(s, part=active_part)
-                    # Best-effort remove of the saved file too.
+                if c2.button("✕", key=f"del-{active_pod}-{s}",
+                             help=f"Remove {s} from '{active_pod}'"):
+                    store.delete_source(s, pod=active_pod)
                     try:
-                        (pdf_dir(active_part) / s).unlink(missing_ok=True)
+                        (pdf_dir(active_pod) / s).unlink(missing_ok=True)
                     except OSError:
                         pass
                     st.rerun()
@@ -205,9 +255,9 @@ with st.sidebar:
 
     # ---- Retrieval scope ----------------------------------------
     search_all = st.checkbox(
-        "Search across all parts",
+        "Search across all pods",
         value=False,
-        help="Off: answers use only the active part. On: retrieval spans every part.",
+        help="Off: answers use only the active pod. On: retrieval spans every pod.",
     )
 
     # ---- Model --------------------------------------------------
@@ -238,7 +288,7 @@ with st.sidebar:
 
 # ------------------------------------------------------------------ chat
 
-scope_label = "all parts" if search_all else f"part: **{active_part}**"
+scope_label = "all pods" if search_all else f"pod: **{active_pod}**"
 st.title("Ask the handbook")
 st.caption(f"Answering from {scope_label}")
 
@@ -249,7 +299,7 @@ for m in st.session_state.messages:
             with st.expander(f"Sources ({len(m['citations'])})"):
                 for h in m["citations"]:
                     st.markdown(
-                        f"**[{h.part}]** {h.source} — page {h.page_number}"
+                        f"**[{h.pod}]** {h.source} — page {h.page_number}"
                         + (f" — §{h.section_path}" if h.section_path else "")
                         + f"  \n_score: {h.score:.2f}_"
                     )
@@ -263,12 +313,12 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
-    scope_part = None if search_all else active_part
-    total_in_scope = store.count(part=scope_part)
+    scope_pod = None if search_all else active_pod
+    total_in_scope = store.count(pod=scope_pod)
 
     if total_in_scope == 0:
         with st.chat_message("assistant"):
-            msg = (f"No documents indexed in '{active_part}' yet. "
+            msg = (f"No documents indexed in '{active_pod}' yet. "
                    "Drop a PDF into the sidebar uploader and click **Ingest uploaded files**.")
             st.warning(msg)
         st.session_state.messages.append({"role": "assistant", "content": msg, "citations": []})
@@ -288,7 +338,7 @@ if question:
         else:
             with st.chat_message("assistant"):
                 with st.spinner("Searching handbook…"):
-                    retrieved = retrieve(store, question, final_k=top_k, part=scope_part)
+                    retrieved = retrieve(store, question, final_k=top_k, pod=scope_pod)
                 messages = [
                     Message(role="system", content=SYSTEM),
                     Message(role="user", content=build_user_prompt(question, retrieved.hits)),
@@ -308,7 +358,7 @@ if question:
                     with st.expander(f"Sources ({len(retrieved.hits)})"):
                         for h in retrieved.hits:
                             st.markdown(
-                                f"**[{h.part}]** {h.source} — page {h.page_number}"
+                                f"**[{h.pod}]** {h.source} — page {h.page_number}"
                                 + (f" — §{h.section_path}" if h.section_path else "")
                                 + f"  \n_score: {h.score:.2f}_"
                             )

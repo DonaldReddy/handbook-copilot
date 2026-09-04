@@ -1,5 +1,6 @@
 .env
 data/chroma/
+data/pods.json
 data/parts.json
 data/pdfs/*
 !data/pdfs/.gitkeep

@@ -18,7 +18,7 @@ def format_context(hits: list[Hit]) -> str:
     """Render retrieved chunks with the metadata the model needs for citations."""
     blocks: list[str] = []
     for i, h in enumerate(hits, start=1):
-        header = f"[Excerpt {i}] part={h.part} | source={h.source} | p.{h.page_number}"
+        header = f"[Excerpt {i}] pod={h.pod} | source={h.source} | p.{h.page_number}"
         if h.section_path:
             header += f" | §{h.section_path}"
         blocks.append(f"{header}\n{h.text}")

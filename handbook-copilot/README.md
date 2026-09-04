@@ -66,30 +66,34 @@ streamlit run app.py
 Streamlit opens `http://localhost:8501` in your browser.
 
 **In the sidebar:**
-1. Pick or create a **Part** — a named group of documents (e.g. *Data
-   Structures*, *Mathematics*). The Default part is always there.
+1. Pick or create a **Pod** — a named group of documents (e.g. *Data
+   Structures*, *Mathematics*). The Default pod is always there.
 2. Drag & drop one or more PDFs into the uploader.
 3. Click **Ingest uploaded files** — the app parses, chunks, embeds, and
    indexes them with a live progress bar per file. Uploaded PDFs are saved
-   to `data/pdfs/<part>/` so nothing is lost between runs.
+   to `data/pdfs/<pod>/` so nothing is lost between runs.
 4. Pick a provider (Ollama is the default — no key needed once Ollama is
    running) and ask questions in the chat.
 
-The **Documents** expander shows every indexed file in the active Part with
+The **Documents** expander shows every indexed file in the active Pod with
 a ✕ button to remove one. Re-uploading a PDF with the same filename is a
 no-op unless you tick **Re-ingest if already present**.
 
-### Parts
+### Pods
 
-A Part is just a named group. The active Part scopes:
+A Pod is just a named group. The active Pod scopes:
 - what the uploader ingests into,
 - what the Documents list shows,
 - what the chat retrieves from.
 
-Tick **Search across all parts** in the sidebar to widen retrieval across
-every Part in one query (citations then show the Part each excerpt came
-from). Deleting a Part removes its chunks from the vector DB and its
-folder under `data/pdfs/`.
+The **Manage pods** expander lets you create, rename, or delete pods. A
+rename moves chunk metadata, the on-disk PDF folder, and the pod registry
+entry in one atomic step.
+
+Tick **Search across all pods** in the sidebar to widen retrieval across
+every Pod in one query (citations then show the Pod each excerpt came
+from). Deleting a Pod removes its chunks from the vector DB and its folder
+under `data/pdfs/`.
 
 ### CLI (optional, still works)
 
@@ -97,7 +101,7 @@ For bulk ingestion or scripting, the CLI takes a file or directory:
 
 ```bash
 python ingest.py data/pdfs                            # into the Default part
-python ingest.py ~/books/dsa --part "Data Structures" # into a named part
+python ingest.py ~/books/dsa --pod "Data Structures"  # into a named pod
 python ingest.py data/pdfs --force                    # re-ingest everything
 python ingest.py data/pdfs --reset                    # wipe the DB first
 ```
