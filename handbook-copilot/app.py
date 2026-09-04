@@ -11,6 +11,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from core.llm import AnthropicProvider, LLMProvider, Message, OllamaProvider, OpenAIProvider
+from core.pipeline import ingest_pdf
 from core.prompts import SYSTEM, build_user_prompt
 from core.retriever import retrieve
 from core.store import Store
@@ -18,6 +19,9 @@ from core.store import Store
 load_dotenv()
 
 st.set_page_config(page_title="Handbook Copilot", page_icon="📘", layout="wide")
+
+PDF_DIR = Path(__file__).resolve().parent / "data" / "pdfs"
+PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ------------------------------------------------------------------ providers
@@ -30,25 +34,94 @@ def _build_provider(choice: str, anthropic_key: str, openai_key: str) -> LLMProv
     return OpenAIProvider(api_key=openai_key or os.getenv("OPENAI_API_KEY"))
 
 
+# ------------------------------------------------------------------ ingest
+
+@st.cache_resource
+def get_store() -> Store:
+    """One Store instance per Streamlit process — Chroma clients aren't cheap."""
+    return Store()
+
+
+def _handle_uploads(uploaded_files, force: bool) -> None:
+    """Save uploaded PDFs to data/pdfs/ and run them through the pipeline."""
+    store = get_store()
+    status_area = st.status(f"Ingesting {len(uploaded_files)} file(s)…", expanded=True)
+
+    with status_area:
+        for uf in uploaded_files:
+            # Save to disk so re-runs / CLI can pick them up too.
+            target = PDF_DIR / uf.name
+            target.write_bytes(uf.getbuffer())
+
+            st.write(f"**{uf.name}**")
+            bar = st.progress(0.0, text="parsing…")
+
+            def progress(stage: str, cur: int, total: int) -> None:
+                if stage == "parsing":
+                    bar.progress(0.05, text="parsing PDF…")
+                elif stage == "chunking":
+                    bar.progress(0.1, text="chunking…")
+                elif stage == "embedding" and total > 0:
+                    frac = 0.1 + 0.9 * (cur / total)
+                    bar.progress(frac, text=f"embedding {cur}/{total} chunks…")
+
+            result = ingest_pdf(target, store, force=force, progress=progress)
+            bar.empty()
+
+            if result.skipped:
+                st.info(f"↳ already ingested — enable *Re-ingest existing* to overwrite.")
+            elif result.error:
+                st.error(f"↳ failed: {result.error}")
+            else:
+                st.success(
+                    f"↳ {result.pages} pages → {result.chunks} chunks indexed."
+                )
+
+    status_area.update(label="Ingest complete.", state="complete", expanded=False)
+
+
 # ------------------------------------------------------------------ sidebar
 
 with st.sidebar:
     st.title("📘 Handbook Copilot")
     st.caption("Local-first RAG over your PDFs")
 
-    store = Store()
+    store = get_store()
     n_chunks = store.count()
     sources = sorted(store.sources())
     st.metric("Indexed chunks", n_chunks)
 
+    # ---- Upload ---------------------------------------------------
+    st.subheader("Add documents")
+    uploaded = st.file_uploader(
+        "Drop PDFs here",
+        type=["pdf"],
+        accept_multiple_files=True,
+        help="Files are saved to data/pdfs/ and indexed immediately.",
+    )
+    force_reingest = st.checkbox(
+        "Re-ingest if already present", value=False,
+        help="Overwrite the stored chunks for any file with the same name.",
+    )
+    if uploaded and st.button("Ingest uploaded files", type="primary", use_container_width=True):
+        _handle_uploads(uploaded, force=force_reingest)
+        st.rerun()
+
+    # ---- Sources list --------------------------------------------
     with st.expander(f"Sources ({len(sources)})", expanded=False):
         if not sources:
-            st.info("No documents ingested yet. Run:\n\n`python ingest.py data/pdfs`")
+            st.info("No documents indexed yet. Drop a PDF above to get started.")
         else:
             for s in sources:
-                st.write(f"• {s}")
+                col1, col2 = st.columns([4, 1])
+                col1.write(f"• {s}")
+                if col2.button("✕", key=f"del-{s}", help=f"Remove {s} from the index"):
+                    store.delete_source(s)
+                    st.rerun()
 
     st.divider()
+
+    # ---- Model ---------------------------------------------------
     st.subheader("Model")
     provider_choice = st.radio(
         "LLM provider",
@@ -105,8 +178,8 @@ if question:
 
     if n_chunks == 0:
         with st.chat_message("assistant"):
-            msg = ("No documents are indexed yet. Drop PDFs into `data/pdfs/` "
-                   "and run `python ingest.py data/pdfs` first.")
+            msg = ("No documents are indexed yet. Drop a PDF into the sidebar uploader "
+                   "and click **Ingest uploaded files**.")
             st.warning(msg)
         st.session_state.messages.append({"role": "assistant", "content": msg, "citations": []})
     else:

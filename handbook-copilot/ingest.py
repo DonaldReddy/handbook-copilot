@@ -4,8 +4,9 @@ Usage:
     python ingest.py data/pdfs
     python ingest.py path/to/handbook.pdf
     python ingest.py data/pdfs --reset      # wipe and rebuild
+    python ingest.py data/pdfs --force      # re-ingest existing sources
 
-Idempotent: sources already in the store are skipped unless --force is given.
+Idempotent by default — files already in the store are skipped.
 """
 from __future__ import annotations
 
@@ -16,9 +17,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from core.chunker import chunk_pages
-from core.embedder import embed_documents
-from core.parser import parse_pdf
+from core.pipeline import ingest_pdf
 from core.store import DEFAULT_DB_DIR, Store
 
 
@@ -46,32 +45,28 @@ def main() -> int:
         return 1
 
     store = Store()
-    existing = store.sources()
 
     for pdf in pdfs:
-        if pdf.name in existing and not args.force:
-            print(f"skip  {pdf.name} (already ingested; use --force to re-ingest)")
-            continue
+        bar: tqdm | None = None
 
-        print(f"parse {pdf.name}")
-        pages = parse_pdf(pdf)
-        if not pages:
-            print(f"  (no text found, skipping)")
-            continue
+        def progress(stage: str, cur: int, total: int) -> None:
+            nonlocal bar
+            if stage == "embedding":
+                if bar is None:
+                    bar = tqdm(total=total, desc=f"      embedding", leave=False)
+                bar.n = cur
+                bar.refresh()
 
-        chunks = chunk_pages(pages)
-        print(f"      {len(pages)} pages → {len(chunks)} chunks")
+        result = ingest_pdf(pdf, store, force=args.force, progress=progress)
+        if bar is not None:
+            bar.close()
 
-        # Overwrite any prior copy of this source.
-        if pdf.name in existing:
-            store.delete_source(pdf.name)
-
-        # Embed in batches so we don't blow memory on huge docs.
-        BATCH = 64
-        for i in tqdm(range(0, len(chunks), BATCH), desc="      embedding", leave=False):
-            batch = chunks[i : i + BATCH]
-            vecs = embed_documents([c.text for c in batch])
-            store.add(batch, vecs)
+        if result.skipped:
+            print(f"skip  {result.source} (already ingested; use --force to re-ingest)")
+        elif result.error:
+            print(f"error {result.source}: {result.error}", file=sys.stderr)
+        else:
+            print(f"ok    {result.source}  {result.pages} pages → {result.chunks} chunks")
 
     print(f"\nDone. Vector store now holds {store.count()} chunks across "
           f"{len(store.sources())} source(s).")

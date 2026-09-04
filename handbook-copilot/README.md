@@ -59,26 +59,33 @@ cp .env.example .env
 
 ## Use it
 
-### Ingest your PDFs
-
-Drop them into `data/pdfs/` and run:
-
-```bash
-python ingest.py data/pdfs
-```
-
-Re-running is idempotent (skips files already in the store). Use `--force` to
-re-ingest a changed file, or `--reset` to wipe the DB.
-
-### Launch the chat
-
 ```bash
 streamlit run app.py
 ```
 
-Streamlit opens `http://localhost:8501` in your browser. Pick a provider in
-the sidebar (Ollama is the default — no key needed once `ollama serve` is
-running) and ask away.
+Streamlit opens `http://localhost:8501` in your browser.
+
+**In the sidebar:**
+1. Drag & drop one or more PDFs into the uploader.
+2. Click **Ingest uploaded files** — the app parses, chunks, embeds, and
+   indexes them with a live progress bar per file. Uploaded PDFs are also
+   saved to `data/pdfs/` so nothing is lost between runs.
+3. Pick a provider (Ollama is the default — no key needed once Ollama is
+   running) and ask questions in the chat.
+
+The **Sources** expander shows every indexed file with a ✕ button to remove
+one. Re-uploading a PDF with the same filename is a no-op unless you tick
+**Re-ingest if already present**.
+
+### CLI (optional, still works)
+
+For bulk ingestion or scripting, the CLI takes a file or directory:
+
+```bash
+python ingest.py data/pdfs           # skip files already indexed
+python ingest.py data/pdfs --force   # re-ingest everything
+python ingest.py data/pdfs --reset   # wipe the DB first
+```
 
 ## Project layout
 

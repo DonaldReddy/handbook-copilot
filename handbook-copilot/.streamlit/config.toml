@@ -1,0 +1,6 @@
+[server]
+# Default is 200 MB. Bumped for large handbooks / textbooks.
+maxUploadSize = 500
+
+[browser]
+gatherUsageStats = false
