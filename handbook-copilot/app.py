@@ -93,10 +93,16 @@ with st.sidebar:
 
     # ---- Upload ---------------------------------------------------
     st.subheader("Add documents")
+    # Bumping this counter after ingest remounts the uploader with a fresh
+    # (empty) selection — otherwise Streamlit keeps the picked files visible.
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
     uploaded = st.file_uploader(
         "Drop PDFs here",
         type=["pdf"],
         accept_multiple_files=True,
+        key=f"uploader-{st.session_state.uploader_key}",
         help="Files are saved to data/pdfs/ and indexed immediately.",
     )
     force_reingest = st.checkbox(
@@ -105,6 +111,7 @@ with st.sidebar:
     )
     if uploaded and st.button("Ingest uploaded files", type="primary", use_container_width=True):
         _handle_uploads(uploaded, force=force_reingest)
+        st.session_state.uploader_key += 1  # clears the dropzone on rerun
         st.rerun()
 
     # ---- Sources list --------------------------------------------
