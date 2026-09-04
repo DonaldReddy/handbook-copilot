@@ -5,12 +5,21 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
 
 from core.llm import AnthropicProvider, LLMProvider, Message, OllamaProvider, OpenAIProvider
+from core.parts import (
+    DEFAULT_PART,
+    create_part,
+    delete_part as registry_delete_part,
+    list_parts,
+    pdf_dir,
+    validate_name,
+)
 from core.pipeline import ingest_pdf
 from core.prompts import SYSTEM, build_user_prompt
 from core.retriever import retrieve
@@ -19,9 +28,6 @@ from core.store import Store
 load_dotenv()
 
 st.set_page_config(page_title="Handbook Copilot", page_icon="📘", layout="wide")
-
-PDF_DIR = Path(__file__).resolve().parent / "data" / "pdfs"
-PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ------------------------------------------------------------------ providers
@@ -34,7 +40,7 @@ def _build_provider(choice: str, anthropic_key: str, openai_key: str) -> LLMProv
     return OpenAIProvider(api_key=openai_key or os.getenv("OPENAI_API_KEY"))
 
 
-# ------------------------------------------------------------------ ingest
+# ------------------------------------------------------------------ resources
 
 @st.cache_resource
 def get_store() -> Store:
@@ -42,15 +48,19 @@ def get_store() -> Store:
     return Store()
 
 
-def _handle_uploads(uploaded_files, force: bool) -> None:
-    """Save uploaded PDFs to data/pdfs/ and run them through the pipeline."""
+# ------------------------------------------------------------------ ingest
+
+def _handle_uploads(uploaded_files, part: str, force: bool) -> None:
+    """Save uploaded PDFs under data/pdfs/<part>/ and index them into the part."""
     store = get_store()
-    status_area = st.status(f"Ingesting {len(uploaded_files)} file(s)…", expanded=True)
+    target_dir = pdf_dir(part)
+    status_area = st.status(
+        f"Ingesting {len(uploaded_files)} file(s) into '{part}'…", expanded=True
+    )
 
     with status_area:
         for uf in uploaded_files:
-            # Save to disk so re-runs / CLI can pick them up too.
-            target = PDF_DIR / uf.name
+            target = target_dir / uf.name
             target.write_bytes(uf.getbuffer())
 
             st.write(f"**{uf.name}**")
@@ -65,19 +75,27 @@ def _handle_uploads(uploaded_files, force: bool) -> None:
                     frac = 0.1 + 0.9 * (cur / total)
                     bar.progress(frac, text=f"embedding {cur}/{total} chunks…")
 
-            result = ingest_pdf(target, store, force=force, progress=progress)
+            result = ingest_pdf(target, store, part=part, force=force, progress=progress)
             bar.empty()
 
             if result.skipped:
-                st.info(f"↳ already ingested — enable *Re-ingest existing* to overwrite.")
+                st.info("↳ already indexed in this part — enable *Re-ingest existing* to overwrite.")
             elif result.error:
                 st.error(f"↳ failed: {result.error}")
             else:
-                st.success(
-                    f"↳ {result.pages} pages → {result.chunks} chunks indexed."
-                )
+                st.success(f"↳ {result.pages} pages → {result.chunks} chunks indexed.")
 
     status_area.update(label="Ingest complete.", state="complete", expanded=False)
+
+
+# ------------------------------------------------------------------ session
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+if "active_part" not in st.session_state:
+    st.session_state.active_part = DEFAULT_PART
 
 
 # ------------------------------------------------------------------ sidebar
@@ -87,48 +105,112 @@ with st.sidebar:
     st.caption("Local-first RAG over your PDFs")
 
     store = get_store()
-    n_chunks = store.count()
-    sources = sorted(store.sources())
-    st.metric("Indexed chunks", n_chunks)
+    parts = list_parts()
 
-    # ---- Upload ---------------------------------------------------
-    st.subheader("Add documents")
-    # Bumping this counter after ingest remounts the uploader with a fresh
-    # (empty) selection — otherwise Streamlit keeps the picked files visible.
-    if "uploader_key" not in st.session_state:
-        st.session_state.uploader_key = 0
+    # ---- Part selector ------------------------------------------
+    st.subheader("Part")
+    if st.session_state.active_part not in parts:
+        st.session_state.active_part = DEFAULT_PART
 
+    active_part = st.selectbox(
+        "Active part",
+        parts,
+        index=parts.index(st.session_state.active_part),
+        label_visibility="collapsed",
+        help="A Part is a group of documents (e.g. 'Data Structures', 'Mathematics').",
+    )
+    if active_part != st.session_state.active_part:
+        st.session_state.active_part = active_part
+        st.session_state.messages = []  # fresh chat when switching parts
+        st.rerun()
+
+    part_chunks = store.count(part=active_part)
+    part_sources = sorted(store.sources(part=active_part))
+    col_a, col_b = st.columns(2)
+    col_a.metric("Documents", len(part_sources))
+    col_b.metric("Chunks", part_chunks)
+
+    with st.expander("Manage parts", expanded=False):
+        new_name = st.text_input("New part name", key="new_part_input",
+                                 placeholder="e.g. Machine Learning")
+        if st.button("Create part", use_container_width=True):
+            try:
+                created = create_part(new_name)
+                st.session_state.active_part = created
+                st.session_state.messages = []
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+        st.divider()
+        if active_part == DEFAULT_PART:
+            st.caption("The Default part cannot be deleted.")
+        else:
+            st.write(f"Delete part **{active_part}**")
+            confirm = st.checkbox(
+                f"I understand this removes all {len(part_sources)} document(s) and "
+                f"{part_chunks} chunk(s) from '{active_part}'.",
+                key=f"confirm-del-{active_part}",
+            )
+            if st.button("Delete this part", type="secondary",
+                         use_container_width=True, disabled=not confirm):
+                store.delete_part(active_part)
+                registry_delete_part(active_part)
+                folder = pdf_dir(active_part)
+                if folder.exists():
+                    shutil.rmtree(folder, ignore_errors=True)
+                st.session_state.active_part = DEFAULT_PART
+                st.session_state.messages = []
+                st.rerun()
+
+    st.divider()
+
+    # ---- Upload -------------------------------------------------
+    st.subheader(f"Add documents to '{active_part}'")
     uploaded = st.file_uploader(
         "Drop PDFs here",
         type=["pdf"],
         accept_multiple_files=True,
-        key=f"uploader-{st.session_state.uploader_key}",
-        help="Files are saved to data/pdfs/ and indexed immediately.",
+        key=f"uploader-{active_part}-{st.session_state.uploader_key}",
+        help=f"Files are saved to data/pdfs/{active_part}/ and indexed into this part.",
     )
     force_reingest = st.checkbox(
         "Re-ingest if already present", value=False,
-        help="Overwrite the stored chunks for any file with the same name.",
+        help="Overwrite the stored chunks for any file with the same name in this part.",
     )
     if uploaded and st.button("Ingest uploaded files", type="primary", use_container_width=True):
-        _handle_uploads(uploaded, force=force_reingest)
+        _handle_uploads(uploaded, part=active_part, force=force_reingest)
         st.session_state.uploader_key += 1  # clears the dropzone on rerun
         st.rerun()
 
-    # ---- Sources list --------------------------------------------
-    with st.expander(f"Sources ({len(sources)})", expanded=False):
-        if not sources:
-            st.info("No documents indexed yet. Drop a PDF above to get started.")
+    # ---- Sources list -------------------------------------------
+    with st.expander(f"Documents in '{active_part}' ({len(part_sources)})", expanded=False):
+        if not part_sources:
+            st.info("No documents yet. Drop a PDF above to get started.")
         else:
-            for s in sources:
-                col1, col2 = st.columns([4, 1])
-                col1.write(f"• {s}")
-                if col2.button("✕", key=f"del-{s}", help=f"Remove {s} from the index"):
-                    store.delete_source(s)
+            for s in part_sources:
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"• {s}")
+                if c2.button("✕", key=f"del-{active_part}-{s}",
+                             help=f"Remove {s} from '{active_part}'"):
+                    store.delete_source(s, part=active_part)
+                    # Best-effort remove of the saved file too.
+                    try:
+                        (pdf_dir(active_part) / s).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     st.rerun()
 
     st.divider()
 
-    # ---- Model ---------------------------------------------------
+    # ---- Retrieval scope ----------------------------------------
+    search_all = st.checkbox(
+        "Search across all parts",
+        value=False,
+        help="Off: answers use only the active part. On: retrieval spans every part.",
+    )
+
+    # ---- Model --------------------------------------------------
     st.subheader("Model")
     provider_choice = st.radio(
         "LLM provider",
@@ -140,7 +222,6 @@ with st.sidebar:
         "Anthropic API key",
         type="password",
         value=os.getenv("ANTHROPIC_API_KEY", ""),
-        help="Only sent to Anthropic when you use the Claude provider.",
     ) if provider_choice == "Anthropic (Claude)" else ""
     openai_key = st.text_input(
         "OpenAI API key",
@@ -157,10 +238,9 @@ with st.sidebar:
 
 # ------------------------------------------------------------------ chat
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
+scope_label = "all parts" if search_all else f"part: **{active_part}**"
 st.title("Ask the handbook")
+st.caption(f"Answering from {scope_label}")
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
@@ -169,7 +249,7 @@ for m in st.session_state.messages:
             with st.expander(f"Sources ({len(m['citations'])})"):
                 for h in m["citations"]:
                     st.markdown(
-                        f"**{h.source}** — page {h.page_number}"
+                        f"**[{h.part}]** {h.source} — page {h.page_number}"
                         + (f" — §{h.section_path}" if h.section_path else "")
                         + f"  \n_score: {h.score:.2f}_"
                     )
@@ -183,10 +263,13 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
-    if n_chunks == 0:
+    scope_part = None if search_all else active_part
+    total_in_scope = store.count(part=scope_part)
+
+    if total_in_scope == 0:
         with st.chat_message("assistant"):
-            msg = ("No documents are indexed yet. Drop a PDF into the sidebar uploader "
-                   "and click **Ingest uploaded files**.")
+            msg = (f"No documents indexed in '{active_part}' yet. "
+                   "Drop a PDF into the sidebar uploader and click **Ingest uploaded files**.")
             st.warning(msg)
         st.session_state.messages.append({"role": "assistant", "content": msg, "citations": []})
     else:
@@ -205,7 +288,7 @@ if question:
         else:
             with st.chat_message("assistant"):
                 with st.spinner("Searching handbook…"):
-                    retrieved = retrieve(store, question, final_k=top_k)
+                    retrieved = retrieve(store, question, final_k=top_k, part=scope_part)
                 messages = [
                     Message(role="system", content=SYSTEM),
                     Message(role="user", content=build_user_prompt(question, retrieved.hits)),
@@ -225,7 +308,7 @@ if question:
                     with st.expander(f"Sources ({len(retrieved.hits)})"):
                         for h in retrieved.hits:
                             st.markdown(
-                                f"**{h.source}** — page {h.page_number}"
+                                f"**[{h.part}]** {h.source} — page {h.page_number}"
                                 + (f" — §{h.section_path}" if h.section_path else "")
                                 + f"  \n_score: {h.score:.2f}_"
                             )

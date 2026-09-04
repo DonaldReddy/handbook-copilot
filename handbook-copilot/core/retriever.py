@@ -1,4 +1,4 @@
-"""Retrieve → rerank.
+"""Retrieve → rerank, optionally scoped to one part.
 
 Vector search casts a wide net (top-k=20), a cross-encoder reranker then
 keeps the top-5 for the LLM. Reranking is the single biggest quality lever
@@ -29,9 +29,14 @@ def _reranker() -> CrossEncoder:
     return CrossEncoder(RERANKER_MODEL)
 
 
-def retrieve(store: Store, query: str, final_k: int = FINAL_K) -> Retrieved:
+def retrieve(
+    store: Store,
+    query: str,
+    final_k: int = FINAL_K,
+    part: str | None = None,
+) -> Retrieved:
     q_vec = embed_query(query)
-    candidates = store.search(q_vec, k=CANDIDATES)
+    candidates = store.search(q_vec, k=CANDIDATES, part=part)
     if not candidates:
         return Retrieved(hits=[])
 

@@ -42,6 +42,7 @@ class Chunk:
     page_number: int         # first page this chunk starts on
     section_path: str = ""   # e.g. "3.2 Academic Integrity" or "" if unknown
     chunk_index: int = 0     # position within the document
+    part: str = ""           # user-defined group; set by the pipeline
     metadata: dict = field(default_factory=dict)
 
 

@@ -1,5 +1,6 @@
 .env
 data/chroma/
+data/parts.json
 data/pdfs/*
 !data/pdfs/.gitkeep
 __pycache__/
